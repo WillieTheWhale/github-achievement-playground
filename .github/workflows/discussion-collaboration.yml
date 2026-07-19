@@ -1,0 +1,50 @@
+name: Run bot-assisted discussion experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Create questions or accept supplied answers
+        required: true
+        type: choice
+        options:
+          - create
+          - accept
+      comment_ids:
+        description: Comma-separated Discussion comment node IDs
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  discussions: write
+
+jobs:
+  discussion-experiment:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODE: ${{ inputs.mode }}
+      COMMENT_IDS: ${{ inputs.comment_ids }}
+      REPOSITORY_ID: R_kgDOTdX9fg
+      CATEGORY_ID: DIC_kwDOTdX9fs4DBh7d
+    steps:
+      - name: Create or accept bot-assisted Q&A
+        run: |
+          create_mutation='mutation($repositoryId:ID!,$categoryId:ID!,$title:String!,$body:String!){createDiscussion(input:{repositoryId:$repositoryId,categoryId:$categoryId,title:$title,body:$body}){discussion{number url}}}'
+          accept_mutation='mutation($id:ID!){markDiscussionCommentAsAnswer(input:{id:$id}){discussion{number url answer{id}}}}'
+
+          if [[ "$MODE" == "create" ]]; then
+            gh api graphql -f query="$create_mutation" \
+              -f repositoryId="$REPOSITORY_ID" -f categoryId="$CATEGORY_ID" \
+              -f title='What should an automated sandbox verify after a workflow run?' \
+              -f body='The automation is asking for a concise post-run verification checklist.'
+            gh api graphql -f query="$create_mutation" \
+              -f repositoryId="$REPOSITORY_ID" -f categoryId="$CATEGORY_ID" \
+              -f title='How should a sandbox distinguish experiments from production work?' \
+              -f body='The automation is asking how a repository can make its non-production purpose obvious.'
+          else
+            IFS=',' read -r first_comment second_comment <<< "$COMMENT_IDS"
+            gh api graphql -f query="$accept_mutation" -f id="$first_comment"
+            gh api graphql -f query="$accept_mutation" -f id="$second_comment"
+          fi
