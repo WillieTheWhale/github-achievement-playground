@@ -7,7 +7,8 @@ All activity here is intentionally isolated from production repositories.
 
 - Issue #1 tested issue creation, a heart reaction, and a prompt closure.
 - Discussions #2 and #3 tested Q&A answers and acceptance behavior.
-- Pull request #4 recorded a human/GitHub Actions co-authored change.
+- Pull requests #4 and #5 recorded both directions of a human/GitHub Actions
+  co-authored change.
 
 The repository does not automate stars, interact with unrelated maintainers, or
 impersonate other contributors.
