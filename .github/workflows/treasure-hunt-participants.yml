@@ -1,0 +1,65 @@
+name: TreasureHunt participant history
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/treasure-hunt-participants.yml'
+      - 'treasure-participants/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query public mainnet explorer APIs
+        run: |
+          set -euxo pipefail
+          mkdir -p treasure-participants
+          for a in \
+            0x74427db4cdd47ae98103f7af5d99d3e5870d8958 \
+            0x4159197f1d604b10feb4c0451c14c1913a6bd5ad \
+            0xce44ef0b9f1eda36d7cc108798e763476af5f8a3 \
+            0xd4be7819a9c5a0f455b7c6de922b9101fa181fb1; do
+            d="treasure-participants/${a}"
+            mkdir -p "$d"
+            curl -fLsS --retry 3 "https://eth.blockscout.com/api/v2/addresses/${a}" -o "$d/address.json" || true
+            for action in txlist txlistinternal tokentx tokennfttx; do
+              curl -fLsS --retry 3 \
+                "https://eth.blockscout.com/api?module=account&action=${action}&address=${a}&startblock=0&endblock=99999999&sort=asc" \
+                -o "$d/${action}.json" || true
+            done
+          done
+          python3 - <<'PY'
+          import json,pathlib,datetime
+          root=pathlib.Path('treasure-participants')
+          out=[]
+          for d in sorted(x for x in root.iterdir() if x.is_dir()):
+            for typ in ['txlist','txlistinternal','tokentx','tokennfttx']:
+              p=d/(typ+'.json')
+              try:data=json.load(open(p)).get('result',[])
+              except Exception:continue
+              if not isinstance(data,list):continue
+              for x in data:
+                ts=int(x.get('timeStamp') or x.get('timestamp') or 0)
+                out.append({
+                  'account':d.name,'kind':typ,'time':datetime.datetime.fromtimestamp(ts,datetime.UTC).isoformat() if ts else '',
+                  'hash':x.get('hash') or x.get('transactionHash'),'from':x.get('from'),'to':x.get('to'),
+                  'value':x.get('value'),'functionName':x.get('functionName'),'methodId':x.get('methodId'),
+                  'input':x.get('input'),'tokenSymbol':x.get('tokenSymbol'),'contractAddress':x.get('contractAddress')
+                })
+          pathlib.Path('treasure-participants/summary.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          for x in out: print(json.dumps(x,sort_keys=True))
+          PY
+      - name: Upload participant histories
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-hunt-participants
+          path: treasure-participants
+          retention-days: 3
+          if-no-files-found: error
