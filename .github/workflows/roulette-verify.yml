@@ -1,0 +1,69 @@
+name: Verify funded CryptoRoulette claim
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'roulette-verify/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read fixed-block state and simulate every guess
+        env:
+          RPC_URL: https://ethereum-rpc.publicnode.com
+          TARGET: '0xb1f4ca3c6256f415e420de511504af8ea8a9c8e0'
+          CALLER: '0xF977814e90dA44bFA03b6295A0616a897441aceC'
+        run: |
+          set -euxo pipefail
+          mkdir -p roulette-out
+          python3 - <<'PY'
+          import json, os, pathlib, time, urllib.request
+          rpc=os.environ['RPC_URL']; target=os.environ['TARGET']; caller=os.environ['CALLER']; out=pathlib.Path('roulette-out')
+          ident=0
+          def call(method,params,optional=False):
+              global ident
+              ident+=1
+              req=urllib.request.Request(rpc,data=json.dumps({'jsonrpc':'2.0','id':ident,'method':method,'params':params}).encode(),headers={'Content-Type':'application/json','User-Agent':'authorized-puzzle-verification'})
+              try:
+                  with urllib.request.urlopen(req,timeout=90) as r: ans=json.load(r)
+              except Exception as e:
+                  if optional:return {'transport_error':repr(e)}
+                  raise
+              if 'error' in ans:
+                  if optional:return {'rpc_error':ans['error']}
+                  raise RuntimeError(ans['error'])
+              return ans['result']
+          block=call('eth_blockNumber',[])
+          balance=call('eth_getBalance',[target,block])
+          code=call('eth_getCode',[target,block])
+          slots={hex(i):call('eth_getStorageAt',[target,hex(i),block]) for i in range(10)}
+          secret=int(slots['0x0'],16); bet=int(slots['0x2'],16); owner='0x'+slots['0x3'][-40:]
+          def tx_for(n):
+              return {'from':caller,'to':target,'value':hex(bet),'data':'0x6898f82b'+n.to_bytes(32,'big').hex(),'gas':'0x2dc6c0'}
+          calls={}; estimates={}; traces={}
+          for n in range(0,11):
+              tx=tx_for(n)
+              calls[str(n)]=call('eth_call',[tx,block],optional=True)
+              estimates[str(n)]=call('eth_estimateGas',[tx,block],optional=True)
+              traces[str(n)]=call('debug_traceCall',[tx,block,{'tracer':'callTracer'}],optional=True)
+          result={'block':block,'target':target,'balance':balance,'balance_wei':str(int(balance,16)),'code':code,'code_bytes':(len(code)-2)//2,'slots':slots,'secret':secret,'bet_wei':str(bet),'owner':owner,'eth_call':calls,'estimate_gas':estimates,'call_traces':traces}
+          (out/'verification.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          (out/'runtime.hex').write_text(code+'\n')
+          print(json.dumps({k:v for k,v in result.items() if k not in ('code','call_traces')},indent=2,sort_keys=True))
+          print('winning trace',json.dumps(traces.get(str(secret)),indent=2,sort_keys=True))
+          PY
+      - name: Upload verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: roulette-verification
+          path: roulette-out
+          retention-days: 2
+          if-no-files-found: error
