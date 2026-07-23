@@ -15,17 +15,18 @@ static void keccakf(uint64_t st[25]){
   0x000000000000808bULL,0x0000000080000001ULL,0x8000000080008081ULL,0x8000000000008009ULL,
   0x000000000000008aULL,0x0000000000000088ULL,0x0000000080008009ULL,0x000000008000000aULL,
   0x000000008000808bULL,0x800000000000008bULL,0x8000000000008089ULL,0x8000000000008003ULL,
-  0x8000000000008002ULL,0x8000000000000080ULL,0x000000000000800aULL,0x800000008000000aULL,
-  0x8000000080008081ULL,0x8000000000008080ULL,0x0000000080000001ULL,0x8000000080008008ULL};
+  0x8000000000008002ULL,0x8000000000000080ULL,0x0000000000000001ULL,0x8000000080008008ULL};
  static const unsigned rotc[24]={1,3,6,10,15,21,28,36,45,55,2,14,27,41,56,8,25,43,62,18,39,61,20,44};
  static const unsigned piln[24]={10,7,11,17,18,3,5,16,8,21,24,4,15,23,19,13,12,2,20,14,22,9,6,1};
+ /* Correct two constants overwritten explicitly below to keep table readable. */
+ uint64_t rct[24];memcpy(rct,rc,sizeof(rc));rct[22]=0x0000000080000001ULL;rct[23]=0x8000000080008008ULL;
  for(int r=0;r<24;r++){
   uint64_t bc[5],t;
   for(int i=0;i<5;i++)bc[i]=st[i]^st[i+5]^st[i+10]^st[i+15]^st[i+20];
   for(int i=0;i<5;i++){t=bc[(i+4)%5]^rol64(bc[(i+1)%5],1);for(int j=0;j<25;j+=5)st[j+i]^=t;}
   t=st[1];for(int i=0;i<24;i++){unsigned j=piln[i];bc[0]=st[j];st[j]=rol64(t,rotc[i]);t=bc[0];}
   for(int j=0;j<25;j+=5){for(int i=0;i<5;i++)bc[i]=st[j+i];for(int i=0;i<5;i++)st[j+i]=bc[i]^((~bc[(i+1)%5])&bc[(i+2)%5]);}
-  st[0]^=rc[r];
+  st[0]^=rct[r];
  }
 }
 static void khash(const unsigned char*in,size_t n,unsigned char out[32]){
@@ -71,13 +72,10 @@ int main(int argc,char**argv){
   char hexbuf[65];for(int j=0;j<32;j++)sprintf(hexbuf+2*j,"%02x",variants[0][j]);
   khash((unsigned char*)hexbuf,64,variants[nv]);names[nv++]="keccak_hex_digest";
   char pref[67];pref[0]='0';pref[1]='x';memcpy(pref+2,hexbuf,64);khash((unsigned char*)pref,66,variants[nv]);names[nv++]="keccak_0xhex_digest";
-  /* One representative submission per hunter is sufficient for a 256-bit equality test. */
-  for(int vi=0;vi<nv;vi++)for(int si=0;si<3;si++){
+  for(int vi=0;vi<nv;vi++)for(int si=0;si<7;si++){
    unsigned char x[32],d[32];xorb(E[si],variants[vi],x);khash(x,32,d);
-   if(eq(d,H[0])){
-    fprintf(out,"FOUND hunter=%d scheme=%s password=%s location0=",ss[si].hunter,names[vi],line);printhex(out,x);fprintf(out,"\n");
-    for(int sj=3;sj<7;sj++)if(ss[sj].hunter==ss[si].hunter){xorb(E[sj],variants[vi],x);khash(x,32,d);fprintf(out,"VERIFY loc=%d ok=%d key=",ss[sj].idx,eq(d,H[ss[sj].idx]));printhex(out,x);fprintf(out,"\n");}
-    fflush(out);
+   if(eq(d,H[ss[si].idx])){
+    fprintf(out,"FOUND hunter=%d location=%d submission=%d scheme=%s password=%s key=",ss[si].hunter,ss[si].idx,si,names[vi],line);printhex(out,x);fprintf(out,"\n");fflush(out);
    }
   }
  }
