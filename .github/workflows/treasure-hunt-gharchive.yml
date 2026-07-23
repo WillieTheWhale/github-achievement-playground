@@ -44,10 +44,15 @@ jobs:
           FORMAT JSONEachRow
           SQL
 
+          query schema <<'SQL' || true
+          DESCRIBE TABLE github_events FORMAT JSONEachRow
+          SQL
+
           query actor-events <<'SQL' || true
           SELECT
-            created_at, event_type, actor_login, repo_name, repo_id,
-            action, ref, ref_type, commit_id, title, body
+            created_at, event_type, actor_login, repo_name,
+            action, ref, ref_type, commit_id, title, body,
+            push_size, push_distinct_size
           FROM github_events
           WHERE actor_login = 'sampullman'
             AND created_at >= '2017-01-01 00:00:00'
@@ -75,7 +80,7 @@ jobs:
           FORMAT JSONEachRow
           SQL
 
-          for f in treasure-gharchive/*.out; do echo "===== $f ====="; wc -l "$f"; head -300 "$f"; done
+          for f in treasure-gharchive/*.out; do echo "===== $f ====="; wc -l "$f"; head -500 "$f"; done
           for f in treasure-gharchive/*.err; do echo "===== $f ====="; cat "$f"; done
           test -s treasure-gharchive/tables.out
 
