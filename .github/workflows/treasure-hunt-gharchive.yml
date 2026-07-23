@@ -1,0 +1,94 @@
+name: TreasureHunt historical GitHub event lookup
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/treasure-hunt-gharchive.yml'
+      - 'treasure-gharchive/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query ClickHouse GH Archive mirror
+        run: |
+          set -uxo pipefail
+          mkdir -p treasure-gharchive
+          query() {
+            name="$1"; shift
+            cat > "treasure-gharchive/${name}.sql"
+            for endpoint in 'https://play.clickhouse.com/?user=play' 'https://play.clickhouse.com/?user=play&password='; do
+              curl -LsS --retry 2 --max-time 300 "$endpoint" -X POST \
+                   --data-binary @"treasure-gharchive/${name}.sql" \
+                   -o "treasure-gharchive/${name}.out" \
+                   2> "treasure-gharchive/${name}.err" || true
+              if ! grep -qE '(^Code:|Exception|UNKNOWN_|ACCESS_DENIED)' "treasure-gharchive/${name}.out"; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          query tables <<'SQL' || true
+          SELECT database, name
+          FROM system.tables
+          WHERE name ILIKE '%github%' OR database ILIKE '%github%'
+          ORDER BY database, name
+          FORMAT JSONEachRow
+          SQL
+
+          query schema <<'SQL' || true
+          DESCRIBE TABLE github_events FORMAT JSONEachRow
+          SQL
+
+          query actor-events <<'SQL' || true
+          SELECT
+            created_at, event_type, actor_login, repo_name,
+            action, ref, ref_type, commit_id, title, body,
+            push_size, push_distinct_size
+          FROM github_events
+          WHERE actor_login = 'sampullman'
+            AND created_at >= '2017-01-01 00:00:00'
+            AND created_at < '2020-01-01 00:00:00'
+          ORDER BY created_at ASC
+          FORMAT JSONEachRow
+          SQL
+
+          query likely-repos <<'SQL' || true
+          SELECT
+            min(created_at) AS first_seen, max(created_at) AS last_seen,
+            repo_name, groupUniqArray(event_type) AS event_types, count() AS events
+          FROM github_events
+          WHERE created_at >= '2017-01-01 00:00:00'
+            AND created_at < '2020-01-01 00:00:00'
+            AND (
+              repo_name ILIKE 'sampullman/%treasure%' OR
+              repo_name ILIKE 'sampullman/%hunt%' OR
+              repo_name ILIKE '%/TreasureHunt%' OR
+              repo_name ILIKE '%/treasure-hunt%' OR
+              repo_name ILIKE '%/TH'
+            )
+          GROUP BY repo_name
+          ORDER BY first_seen ASC
+          FORMAT JSONEachRow
+          SQL
+
+          for f in treasure-gharchive/*.out; do echo "===== $f ====="; wc -l "$f"; head -500 "$f"; done
+          for f in treasure-gharchive/*.err; do echo "===== $f ====="; cat "$f"; done
+          test -s treasure-gharchive/tables.out
+
+      - name: Upload GH Archive results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-hunt-gharchive
+          path: treasure-gharchive
+          retention-days: 3
+          if-no-files-found: error

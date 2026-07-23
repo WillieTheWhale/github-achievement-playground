@@ -1,0 +1,74 @@
+name: Powerful Moss audio acquisition
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/powerful-moss-audio.yml'
+      - 'powerful-moss/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          python3 -m pip install --upgrade yt-dlp
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Fetch source pages
+        run: |
+          set -euxo pipefail
+          mkdir -p powerful-moss/raw powerful-moss/audio
+          curl -fL --retry 3 -A 'Mozilla/5.0' \
+            https://logicbeach.xyz/powerfulmoss.html \
+            -o powerful-moss/raw/powerfulmoss.html
+          curl -fL --retry 3 -A 'Mozilla/5.0' \
+            https://logicbeach.bandcamp.com/album/powerfulmoss \
+            -o powerful-moss/raw/bandcamp.html
+          grep -Eo 'https:[^" ]+\.(mp3|flac|wav)(\?[^" ]*)?' powerful-moss/raw/bandcamp.html \
+            | sed 's/&amp;/\&/g' | sort -u > powerful-moss/raw/audio-urls.txt || true
+          grep -Eo 'https:[^" ]+' powerful-moss/raw/powerfulmoss.html \
+            | sed 's/&amp;/\&/g' | sort -u > powerful-moss/raw/site-urls.txt || true
+
+      - name: Download Bandcamp streams
+        id: bandcamp
+        continue-on-error: true
+        run: |
+          set -euxo pipefail
+          yt-dlp --yes-playlist --ignore-errors --no-overwrites \
+            -x --audio-format wav --audio-quality 0 \
+            -o 'powerful-moss/audio/%(playlist_index)02d-%(title)s.%(ext)s' \
+            https://logicbeach.bandcamp.com/album/powerfulmoss
+
+      - name: Download YouTube Music playlist fallback
+        if: steps.bandcamp.outcome != 'success'
+        run: |
+          set -euxo pipefail
+          yt-dlp --yes-playlist --ignore-errors --no-overwrites \
+            -x --audio-format wav --audio-quality 0 \
+            -o 'powerful-moss/audio/%(playlist_index)02d-%(title)s.%(ext)s' \
+            'https://music.youtube.com/playlist?list=OLAK5uy_kfF9cwECQUmlBhRzcgn_ZJ5xqUAjn5UkY'
+
+      - name: Inventory and hash
+        run: |
+          set -euxo pipefail
+          find powerful-moss/audio -type f -printf '%f\t%s\n' | sort | tee powerful-moss/raw/audio-inventory.tsv
+          sha256sum powerful-moss/audio/* 2>/dev/null | sort > powerful-moss/raw/audio-sha256.txt || true
+          test "$(find powerful-moss/audio -type f | wc -l)" -ge 12
+
+      - name: Upload acquisition bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: powerful-moss-audio
+          path: powerful-moss
+          retention-days: 2
+          if-no-files-found: error

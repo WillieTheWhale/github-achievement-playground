@@ -1,0 +1,61 @@
+name: TreasureHunt targeted password scan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/treasure-hunt-targeted-crack.yml'
+      - 'treasure-targeted/**'
+      - 'treasure-discovery/crack_treasure.c'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate account and location patterns
+        run: |
+          set -euxo pipefail
+          mkdir -p treasure-targeted/out
+          python3 - <<'PY'
+          from pathlib import Path
+          bases=['account','password','passwd','pass','hunter','treasure','hunt','location','loc','podo','podolabs','pledgecamp','ethereum','ether','crypto','blockchain','test','admin','user','guest','sam','john']
+          suffixes=['','!','!!','123','1234','2018','2019','2020','20','01','007','69','420']
+          words=set()
+          for base in bases:
+            for i in range(0,10001):
+              nums={str(i),f'{i:02d}',f'{i:03d}',f'{i:04d}'}
+              for n in nums:
+                for b in {base,base.title(),base.upper()}:
+                  for sep in {'','_','-',' '}:
+                    for s in suffixes:
+                      words.add(b+sep+n+s)
+          # Test public identifiers and transaction-derived strings as plausible convenience passwords.
+          ids=['74427db4cdd47ae98103f7af5d99d3e5870d8958','4159197f1d604b10feb4c0451c14c1913a6bd5ad','ce44ef0b9f1eda36d7cc108798e763476af5f8a3','d4be7819a9c5a0f455b7c6de922b9101fa181fb1','0fa5beca6764fc7706d3a46bd5017fad88357a0a']
+          for x in ids:
+            for y in {x,'0x'+x,x[:6],x[-6:],x[:8],x[-8:]}: words.add(y)
+          Path('treasure-targeted/candidates.txt').write_text('\n'.join(sorted(words))+'\n')
+          print(len(words))
+          PY
+          wc -l treasure-targeted/candidates.txt
+      - name: Test all historical submissions
+        run: |
+          set -euxo pipefail
+          gcc -O3 -march=native treasure-discovery/crack_treasure.c -lcrypto -o treasure-targeted/crack
+          : > treasure-targeted/out/results.txt
+          /usr/bin/time -v treasure-targeted/crack treasure-targeted/candidates.txt treasure-targeted/out/results.txt \
+            2> treasure-targeted/out/timing.txt
+          cat treasure-targeted/out/results.txt
+      - name: Upload targeted results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-hunt-targeted-password-scan
+          path: treasure-targeted/out
+          retention-days: 3
+          if-no-files-found: error

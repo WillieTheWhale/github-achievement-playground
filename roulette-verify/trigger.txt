@@ -1,0 +1,1 @@
+Read the current secret and simulate all guesses at one fixed mainnet block.

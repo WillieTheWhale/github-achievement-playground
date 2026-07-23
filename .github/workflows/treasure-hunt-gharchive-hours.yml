@@ -1,0 +1,62 @@
+name: TreasureHunt raw GH Archive scan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/treasure-hunt-gharchive-hours.yml'
+      - 'treasure-gharchive-hours/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan targeted 2018 public GitHub event hours
+        run: |
+          set -euxo pipefail
+          mkdir -p treasure-gharchive-hours
+          python3 - <<'PY'
+          from pathlib import Path
+          # eth-docgen extraction commit at 2018-04-18 19:53 UTC; scan a generous surrounding window.
+          days=['2018-04-17','2018-04-18','2018-04-19','2018-04-20','2018-07-30','2018-07-31','2018-08-06','2018-08-07']
+          Path('treasure-gharchive-hours/hours.txt').write_text(''.join(f'{d}-{h}\n' for d in days for h in range(24)))
+          PY
+          : > treasure-gharchive-hours/events.jsonl
+          : > treasure-gharchive-hours/errors.log
+          while read hour; do
+            url="https://data.gharchive.org/${hour}.json.gz"
+            echo "$url" >&2
+            if curl -fLsS --retry 3 --max-time 180 "$url" \
+               | gzip -dc \
+               | jq -c 'select(
+                    ((.actor.login // "") | ascii_downcase) == "sampullman" or
+                    ((.repo.name // "") | ascii_downcase | startswith("sampullman/")) or
+                    ((.repo.name // "") | ascii_downcase | contains("treasure")) or
+                    ((.repo.name // "") | ascii_downcase | endswith("/th")) or
+                    ((.payload.commits // []) | any(((.message // "") | ascii_downcase | contains("treasure")) or ((.message // "") | ascii_downcase | contains("hunt"))))
+                  )' >> treasure-gharchive-hours/events.jsonl; then
+              :
+            else
+              echo "FAILED $url" >> treasure-gharchive-hours/errors.log
+            fi
+          done < treasure-gharchive-hours/hours.txt
+          echo "matched events: $(wc -l < treasure-gharchive-hours/events.jsonl)"
+          jq -r '[.created_at,.type,.actor.login,.repo.name,(.payload.ref // ""),((.payload.commits // []) | map(.sha + " " + .message) | join(" | "))] | @tsv' \
+            treasure-gharchive-hours/events.jsonl | tee treasure-gharchive-hours/summary.tsv
+          grep -inEi 'treasure|hunt|sampullman/.+th|eth-docgen' treasure-gharchive-hours/events.jsonl \
+            > treasure-gharchive-hours/interesting.txt || true
+
+      - name: Upload raw GH Archive matches
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-hunt-gharchive-hours
+          path: treasure-gharchive-hours
+          retention-days: 3
+          if-no-files-found: error

@@ -1,0 +1,68 @@
+name: TreasureHunt predecessor deployment inspection
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/treasure-hunt-predecessors.yml'
+      - 'treasure-predecessors/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect predecessor deployments
+        run: |
+          set -euxo pipefail
+          mkdir -p treasure-predecessors
+          python3 - <<'PY'
+          import json,pathlib,urllib.request
+          addrs=['0x30bace5e839ba0ee1c990743f9db5c22e3202dd3','0x4529e738b6f3c188840935b777eedf6ec62ff25b']
+          endpoints=['https://ethereum-rpc.publicnode.com','https://eth.llamarpc.com','https://1rpc.io/eth']
+          ident=0
+          def r(url,m,p):
+            global ident;ident+=1
+            q=urllib.request.Request(url,data=json.dumps({'jsonrpc':'2.0','id':ident,'method':m,'params':p}).encode(),headers={'Content-Type':'application/json','User-Agent':'treasure-predecessors'})
+            with urllib.request.urlopen(q,timeout=90) as x:y=json.load(x)
+            if 'error' in y:raise RuntimeError(y['error'])
+            return y['result']
+          rpc=None
+          for x in endpoints:
+            try:block=r(x,'eth_blockNumber',[]);rpc=x;break
+            except Exception:pass
+          if not rpc:raise SystemExit('no rpc')
+          root=pathlib.Path('treasure-predecessors')
+          result={'rpc':rpc,'block':block,'contracts':{}}
+          for a in addrs:
+            d=root/a;d.mkdir()
+            c={'code':r(rpc,'eth_getCode',[a,block]),'balance':r(rpc,'eth_getBalance',[a,block]),'storage':{}}
+            for i in range(64):c['storage'][hex(i)]=r(rpc,'eth_getStorageAt',[a,hex(i),block])
+            for endpoint,name in [
+              (f'https://eth.blockscout.com/api/v2/smart-contracts/{a}','smart-contract'),
+              (f'https://eth.blockscout.com/api/v2/addresses/{a}','address'),
+              (f'https://eth.blockscout.com/api?module=account&action=txlist&address={a}&startblock=0&endblock=99999999&sort=asc','txlist'),
+              (f'https://eth.blockscout.com/api?module=account&action=txlistinternal&address={a}&startblock=0&endblock=99999999&sort=asc','txlistinternal')]:
+              try:
+                with urllib.request.urlopen(urllib.request.Request(endpoint,headers={'User-Agent':'treasure-predecessors'}),timeout=90) as x:data=json.load(x)
+              except Exception as e:data={'error':repr(e)}
+              (d/(name+'.json')).write_text(json.dumps(data,indent=2,sort_keys=True)+'\n')
+              c[name]=data
+            result['contracts'][a]=c
+          (root/'summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          for a,c in result['contracts'].items():
+            print(a,'codebytes',(len(c['code'])-2)//2,'balance',int(c['balance'],16))
+            print('txs',len(c.get('txlist',{}).get('result',[]) if isinstance(c.get('txlist'),dict) else []))
+          PY
+      - name: Upload predecessor data
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-hunt-predecessors
+          path: treasure-predecessors
+          retention-days: 3
+          if-no-files-found: error

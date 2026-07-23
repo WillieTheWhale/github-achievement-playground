@@ -1,0 +1,79 @@
+name: TreasureHunt state reconstruction
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/treasure-hunt-state.yml'
+      - 'treasure-hunt/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query live contract state and activity
+        run: |
+          set -euxo pipefail
+          mkdir -p treasure-hunt-out
+          python3 - <<'PY'
+          import json, pathlib, urllib.request, time
+          target='0x0fa5beca6764fc7706d3a46bd5017fad88357a0a'
+          endpoints=['https://ethereum-rpc.publicnode.com','https://eth.llamarpc.com','https://1rpc.io/eth','https://eth.merkle.io']
+          ident=0
+          def rpc(url,method,params):
+            global ident
+            ident+=1
+            body=json.dumps({'jsonrpc':'2.0','id':ident,'method':method,'params':params}).encode()
+            req=urllib.request.Request(url,data=body,headers={'Content-Type':'application/json','User-Agent':'treasure-hunt-research'})
+            with urllib.request.urlopen(req,timeout=90) as r:
+              x=json.load(r)
+            if 'error' in x: raise RuntimeError(x['error'])
+            return x['result']
+          url=None
+          for x in endpoints:
+            try:
+              block=rpc(x,'eth_blockNumber',[]); url=x; break
+            except Exception as e: print('endpoint failed',x,repr(e))
+          if not url: raise SystemExit('no RPC')
+          def call(data,block=block,frm='0x0000000000000000000000000000000000000001',value=None):
+            tx={'to':target,'from':frm,'data':data}
+            if value is not None: tx['value']=hex(value)
+            return rpc(url,'eth_call',[tx,block])
+          sels={
+            'locationsLength':'0x859832e6','cost':'0x13faede6','pot':'0x4ba2363a','ownersBalance':'0x750482ba',
+            'timeOfWin':'0xa1b94c0b','winner':'0xdfbf53ae','grace':'0x1eefddb1','owner':'0x8da5cb5b'
+          }
+          result={'rpc':url,'block':block,'balance_wei':str(int(rpc(url,'eth_getBalance',[target,block]),16)),'code':rpc(url,'eth_getCode',[target,block]),'calls':{},'storage':{}}
+          for name,sel in sels.items():
+            try: result['calls'][name]=call(sel)
+            except Exception as e: result['calls'][name]={'error':repr(e)}
+          n=int(result['calls']['locationsLength'],16)
+          result['locations']=[]
+          for i in range(n):
+            data='0xb9e0db35'+i.to_bytes(32,'big').hex()
+            result['locations'].append(call(data))
+          for i in range(0,16):
+            try: result['storage'][hex(i)]=rpc(url,'eth_getStorageAt',[target,hex(i),block])
+            except Exception as e: result['storage'][hex(i)]={'error':repr(e)}
+          # Etherscan-compatible tx history through Blockscout.
+          api='https://eth.blockscout.com/api?module=account&action=txlist&address='+target+'&startblock=0&endblock=99999999&sort=asc'
+          try:
+            with urllib.request.urlopen(urllib.request.Request(api,headers={'User-Agent':'treasure-hunt-research'}),timeout=90) as r:
+              result['transactions']=json.load(r)
+          except Exception as e: result['transactions']={'error':repr(e)}
+          p=pathlib.Path('treasure-hunt-out/state.json'); p.write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({k:v for k,v in result.items() if k not in ('code','transactions')},indent=2,sort_keys=True))
+          PY
+      - name: Upload state reconstruction
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-hunt-state
+          path: treasure-hunt-out
+          retention-days: 3
+          if-no-files-found: error
