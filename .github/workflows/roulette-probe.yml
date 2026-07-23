@@ -1,0 +1,104 @@
+name: Prove CryptoRoulette payout by state override
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'roulette-probe/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Execute a non-mutating claimant harness against fixed mainnet state
+        env:
+          TARGET: '0xb1f4ca3c6256f415e420de511504af8ea8a9c8e0'
+          HARNESS: '0x00000000000000000000000000000000b017f001'
+          CALLER: '0xF977814e90dA44bFA03b6295A0616a897441aceC'
+        run: |
+          set -euxo pipefail
+          mkdir -p roulette-probe-out
+          python3 - <<'PY'
+          import json, os, pathlib, time, urllib.request
+          target=os.environ['TARGET']; harness=os.environ['HARNESS']; caller=os.environ['CALLER']
+          bet=200_000_000_000_000_000
+          endpoints=[
+              'https://ethereum-rpc.publicnode.com',
+              'https://eth.llamarpc.com',
+              'https://1rpc.io/eth',
+              'https://rpc.ankr.com/eth',
+          ]
+          ident=0
+          def raw_rpc(url,method,params):
+              global ident
+              ident+=1
+              body=json.dumps({'jsonrpc':'2.0','id':ident,'method':method,'params':params}).encode()
+              q=urllib.request.Request(url,data=body,headers={'Content-Type':'application/json','User-Agent':'authorized-puzzle-payout-proof'})
+              with urllib.request.urlopen(q,timeout=90) as r:return json.load(r)
+          rpc=None
+          for url in endpoints:
+              try:
+                  ans=raw_rpc(url,'eth_blockNumber',[])
+                  if 'result' in ans:
+                      rpc=url; block=ans['result']; break
+              except Exception: pass
+          if not rpc: raise RuntimeError('no RPC endpoint available')
+
+          # Runtime harness:
+          # - empty calldata (the target's transfer callback) => STOP
+          # - otherwise, call target.play(guess) with 0.2 ETH
+          # - return [harness selfbalance, CALL success]
+          def harness_code(guess):
+              main=bytearray()
+              main += bytes.fromhex('636898f82b60e01b5f52')
+              main += bytes([0x60,guess,0x60,0x04,0x52])
+              main += bytes.fromhex('5f5f60245f')
+              main += bytes([0x67])+bet.to_bytes(8,'big')
+              main += bytes([0x73])+bytes.fromhex(target[2:])
+              main += bytes.fromhex('5af1602052475f5260405ff3')
+              # CALLDATASIZE ISZERO PUSH1(stop) JUMPI <main> JUMPDEST STOP
+              prefix=bytearray.fromhex('3615600057')
+              stop=len(prefix)+len(main)
+              if stop>255: raise AssertionError(stop)
+              prefix[3]=stop
+              return '0x'+(prefix+main+bytes.fromhex('5b00')).hex()
+
+          target_balance=raw_rpc(rpc,'eth_getBalance',[target,block])
+          secret=raw_rpc(rpc,'eth_getStorageAt',[target,'0x0',block])
+          rows=[]
+          for guess in range(0,11):
+              code=harness_code(guess)
+              tx={'from':caller,'to':harness,'data':'0x01','gas':'0x5b8d80'}
+              override={harness:{'code':code,'balance':hex(bet)}}
+              ans=raw_rpc(rpc,'eth_call',[tx,block,override])
+              row={'guess':guess,'rpc_response':ans}
+              if 'result' in ans and len(ans['result'])>=130:
+                  data=bytes.fromhex(ans['result'][2:])
+                  row['harness_final_balance_wei']=str(int.from_bytes(data[:32],'big'))
+                  row['target_call_success']=bool(int.from_bytes(data[32:64],'big'))
+              rows.append(row)
+          result={'rpc':rpc,'block':block,'target':target,'target_balance_wei':str(int(target_balance,16)),'secret_slot_0':str(int(secret,16)),'bet_wei':str(bet),'rows':rows}
+          pathlib.Path('roulette-probe-out/proof.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(result,indent=2,sort_keys=True))
+          winners=[x for x in rows if int(x.get('harness_final_balance_wei','0'))>bet]
+          if len(winners)!=1:
+              raise RuntimeError(f'expected exactly one winning guess, got {winners}')
+          if winners[0]['guess']!=int(secret,16):
+              raise RuntimeError(f"winning guess {winners[0]['guess']} != slot secret {int(secret,16)}")
+          if int(winners[0]['harness_final_balance_wei']) != int(target_balance,16)+bet:
+              raise RuntimeError('winning payout did not equal target balance plus stake')
+          PY
+      - name: Upload payout proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roulette-payout-proof
+          path: roulette-probe-out
+          retention-days: 2
+          if-no-files-found: error
