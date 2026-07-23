@@ -25,23 +25,22 @@ jobs:
             name="$1"; shift
             cat > "treasure-gharchive/${name}.sql"
             for endpoint in 'https://play.clickhouse.com/?user=play' 'https://play.clickhouse.com/?user=play&password='; do
-              if curl -LsS --retry 2 --max-time 300 "$endpoint" -X POST \
+              curl -LsS --retry 2 --max-time 300 "$endpoint" -X POST \
                    --data-binary @"treasure-gharchive/${name}.sql" \
                    -o "treasure-gharchive/${name}.out" \
-                   2> "treasure-gharchive/${name}.err"; then
-                if ! grep -qE '(^Code:|Exception|UNKNOWN_TABLE|ACCESS_DENIED)' "treasure-gharchive/${name}.out"; then
-                  return 0
-                fi
+                   2> "treasure-gharchive/${name}.err" || true
+              if ! grep -qE '(^Code:|Exception|UNKNOWN_|ACCESS_DENIED)' "treasure-gharchive/${name}.out"; then
+                return 0
               fi
             done
             return 1
           }
 
-          query actor-repos <<'SQL' || true
-          SELECT actor_login, repo_name, pushes, issues, stars
-          FROM github.actors_per_repo
-          WHERE actor_login = 'sampullman'
-          ORDER BY repo_name
+          query tables <<'SQL' || true
+          SELECT database, name
+          FROM system.tables
+          WHERE name ILIKE '%github%' OR database ILIKE '%github%'
+          ORDER BY database, name
           FORMAT JSONEachRow
           SQL
 
@@ -49,7 +48,7 @@ jobs:
           SELECT
             created_at, event_type, actor_login, repo_name, repo_id,
             action, ref, ref_type, commit_id, title, body
-          FROM github.events
+          FROM github_events
           WHERE actor_login = 'sampullman'
             AND created_at >= '2017-01-01 00:00:00'
             AND created_at < '2020-01-01 00:00:00'
@@ -60,8 +59,8 @@ jobs:
           query likely-repos <<'SQL' || true
           SELECT
             min(created_at) AS first_seen, max(created_at) AS last_seen,
-            repo_name, repo_id, groupUniqArray(event_type) AS event_types, count() AS events
-          FROM github.events
+            repo_name, groupUniqArray(event_type) AS event_types, count() AS events
+          FROM github_events
           WHERE created_at >= '2017-01-01 00:00:00'
             AND created_at < '2020-01-01 00:00:00'
             AND (
@@ -71,14 +70,14 @@ jobs:
               repo_name ILIKE '%/treasure-hunt%' OR
               repo_name ILIKE '%/TH'
             )
-          GROUP BY repo_name, repo_id
+          GROUP BY repo_name
           ORDER BY first_seen ASC
           FORMAT JSONEachRow
           SQL
 
-          for f in treasure-gharchive/*.out; do echo "===== $f ====="; wc -l "$f"; head -200 "$f"; done
+          for f in treasure-gharchive/*.out; do echo "===== $f ====="; wc -l "$f"; head -300 "$f"; done
           for f in treasure-gharchive/*.err; do echo "===== $f ====="; cat "$f"; done
-          test -s treasure-gharchive/actor-repos.out -o -s treasure-gharchive/actor-events.out -o -s treasure-gharchive/likely-repos.out
+          test -s treasure-gharchive/tables.out
 
       - name: Upload GH Archive results
         if: always()
