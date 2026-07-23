@@ -1,0 +1,140 @@
+name: Bountiful exact-build research
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bountiful-research/**'
+      - '.github/workflows/bountiful-research.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact compiler and deployed source
+        run: |
+          set -euxo pipefail
+          mkdir -p research/out
+          curl -fL --retry 3 -o research/fe \
+            https://github.com/argotorg/fe/releases/download/v26.1.0/fe_linux_amd64
+          chmod +x research/fe
+          research/fe --version | tee research/out/fe-version.txt
+          git clone https://github.com/fe-lang/bountiful.git research/bountiful
+          git -C research/bountiful checkout d5e2ce34021336a234f4b7de36719087ea6fb96e
+          git -C research/bountiful submodule update --init --recursive
+
+      - name: Build exact deployment artifacts
+        run: |
+          set -euxo pipefail
+          export PATH="$PWD/research:$PATH"
+          (cd research/bountiful/contracts && fe build)
+          find research/bountiful/contracts/out -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee research/out/artifact-list.txt
+          cp -a research/bountiful/contracts/out research/out/compiler-artifacts
+
+      - name: Snapshot current and deployment-time chain data
+        env:
+          RPC_URL: https://ethereum-rpc.publicnode.com
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, urllib.request
+
+          rpc = os.environ['RPC_URL']
+          out = pathlib.Path('research/out/chain')
+          out.mkdir(parents=True, exist_ok=True)
+          addresses = {
+              'BountyRegistry':'0x71fB6afcD98c5BD611712ad4b8D314EF729aa69D',
+              'Game':'0x046a3a4968282BaA7ad6291723873C8275434623',
+              'Game2D':'0xE959e7ecA1afCa6cf2Bf8b07e25Da355b6C8E8c7',
+              'GameEnum':'0xfb5423aDfBAC65ac675845Bb4FEBf8aeC128272E',
+              'GameBitboard':'0x5E987b6aADD4DFC2236D21edE6D07feb04350b06',
+              'GameTrait':'0x85b4d0B32b8a285111c244E52524B642f1A5ccFE',
+              'GameNested':'0x3dF9789634995546B0126bC28B9F9FcBCB129F18',
+              'GameMonadic':'0x86B7AEce1503242fED29E593FAEde3b7b00a5a1D',
+          }
+          txs = {
+              'BountyRegistry':'0xb74abeb76c6436d54df5f8022703580955b29cc8377d358672a2f153962d0822',
+              'Game':'0x7029e88853a088af05c4c6c30aa656f59e30493d8e175d84859ca0c963629759',
+              'Game2D':'0xc7c385f60c4691bc6304c70c959b24a180f17e12cc2ee58beb20b76041dd43ff',
+              'GameEnum':'0xc4e810c93f9fd7cea0a780f2b8f0f2a00414deb856f05d782ea9a777e67c174c',
+              'GameBitboard':'0x4f379dbab41f2e6b9c49bba27f5bec239f886ea1155d35db8441a73b1eb326b8',
+              'GameTrait':'0x5439b0576f59d5afba74a730c9ee6d9e6a2735820ebe51ccd3b58852617a9916',
+              'GameNested':'0x27282a8b5e04e206a974e3a67913c8a7f8c4ddba1daf5d10e6e380a54138b284',
+              'GameMonadic':'0x0014d6d7ab6541401223321cfb6676694542e6f59412a132d13393f1ffb49686',
+          }
+          counter = 0
+          def call(method, params):
+              global counter
+              counter += 1
+              body = json.dumps({'jsonrpc':'2.0','id':counter,'method':method,'params':params}).encode()
+              req = urllib.request.Request(rpc, data=body, headers={'Content-Type':'application/json','User-Agent':'bountiful-research'})
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = json.load(r)
+              if 'error' in data:
+                  raise RuntimeError(data['error'])
+              return data['result']
+
+          latest = call('eth_blockNumber', [])
+          (out/'latest-block.txt').write_text(latest+'\n')
+          summary = {'latest_block': latest, 'addresses': {}}
+          for name, addr in addresses.items():
+              code = call('eth_getCode', [addr, 'latest'])
+              bal = call('eth_getBalance', [addr, 'latest'])
+              (out/f'{name}.runtime.hex').write_text(code+'\n')
+              slots = {}
+              for i in range(0, 40):
+                  value = call('eth_getStorageAt', [addr, hex(i), 'latest'])
+                  slots[hex(i)] = value
+              (out/f'{name}.storage.json').write_text(json.dumps(slots, indent=2, sort_keys=True)+'\n')
+              summary['addresses'][name] = {'address': addr, 'balance': bal, 'code_bytes': (len(code)-2)//2}
+          for name, txh in txs.items():
+              tx = call('eth_getTransactionByHash', [txh])
+              receipt = call('eth_getTransactionReceipt', [txh])
+              (out/f'{name}.creation-tx.json').write_text(json.dumps(tx, indent=2, sort_keys=True)+'\n')
+              (out/f'{name}.creation-receipt.json').write_text(json.dumps(receipt, indent=2, sort_keys=True)+'\n')
+          (out/'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True)+'\n')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Compare compiled and deployed runtimes
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          root = pathlib.Path('research/out')
+          compiled_dir = root/'compiler-artifacts'
+          chain_dir = root/'chain'
+          rows=[]
+          for name in ['BountyRegistry','Game','Game2D','GameEnum','GameBitboard','GameTrait','GameNested','GameMonadic']:
+              chain = bytes.fromhex((chain_dir/f'{name}.runtime.hex').read_text().strip()[2:])
+              candidates=[]
+              for p in compiled_dir.glob('*'):
+                  if name.lower() not in p.name.lower():
+                      continue
+                  raw=p.read_bytes()
+                  try:
+                      txt=raw.decode().strip()
+                      if txt.startswith('0x'): txt=txt[2:]
+                      data=bytes.fromhex(txt)
+                  except Exception:
+                      data=raw
+                  candidates.append({'file':p.name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'exact':data==chain,'suffix':data.endswith(chain)})
+              rows.append({'name':name,'chain_bytes':len(chain),'chain_sha256':hashlib.sha256(chain).hexdigest(),'candidates':candidates})
+          (root/'comparison.json').write_text(json.dumps(rows,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(rows,indent=2,sort_keys=True))
+          PY
+
+      - name: Package exact artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bountiful-exact-build
+          path: research/out
+          retention-days: 7
+          if-no-files-found: error
