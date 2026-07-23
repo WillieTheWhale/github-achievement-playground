@@ -1,0 +1,80 @@
+name: TreasureHunt historical GitHub event lookup
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/treasure-hunt-gharchive.yml'
+      - 'treasure-gharchive/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query ClickHouse GH Archive mirror
+        run: |
+          set -euxo pipefail
+          mkdir -p treasure-gharchive
+          cat > treasure-gharchive/query.sql <<'SQL'
+          SELECT
+            created_at,
+            event_type,
+            actor_login,
+            repo_name,
+            repo_id,
+            action,
+            ref,
+            ref_type,
+            commit_id,
+            title,
+            body
+          FROM github_events
+          WHERE actor_login IN ('sampullman', 'sam-pullman')
+            AND created_at >= '2017-01-01 00:00:00'
+            AND created_at < '2020-01-01 00:00:00'
+          ORDER BY created_at ASC
+          FORMAT JSONEachRow
+          SQL
+          curl -fLsS --retry 3 'https://play.clickhouse.com/' \
+            -X POST -H 'Authorization: Basic cGxheTo=' \
+            --data-binary @treasure-gharchive/query.sql \
+            -o treasure-gharchive/sampullman-events.jsonl
+          wc -l treasure-gharchive/sampullman-events.jsonl
+          cat treasure-gharchive/sampullman-events.jsonl
+
+          cat > treasure-gharchive/repo-query.sql <<'SQL'
+          SELECT
+            min(created_at) AS first_seen,
+            max(created_at) AS last_seen,
+            repo_name,
+            repo_id,
+            groupUniqArray(event_type) AS event_types,
+            count() AS events
+          FROM github_events
+          WHERE (actor_login = 'sampullman' OR repo_name ILIKE '%treasure%' OR repo_name ILIKE '%hunt%')
+            AND created_at >= '2018-01-01 00:00:00'
+            AND created_at < '2019-01-01 00:00:00'
+            AND (actor_login = 'sampullman' OR repo_name ILIKE 'sampullman/%' OR repo_name ILIKE '%TreasureHunt%' OR repo_name ILIKE '%treasure-hunt%')
+          GROUP BY repo_name, repo_id
+          ORDER BY first_seen ASC
+          FORMAT JSONEachRow
+          SQL
+          curl -fLsS --retry 3 'https://play.clickhouse.com/' \
+            -X POST -H 'Authorization: Basic cGxheTo=' \
+            --data-binary @treasure-gharchive/repo-query.sql \
+            -o treasure-gharchive/repositories.jsonl
+          cat treasure-gharchive/repositories.jsonl
+
+      - name: Upload GH Archive results
+        uses: actions/upload-artifact@v4
+        with:
+          name: treasure-hunt-gharchive
+          path: treasure-gharchive
+          retention-days: 3
+          if-no-files-found: error
