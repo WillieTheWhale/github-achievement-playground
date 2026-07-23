@@ -1,2 +1,2 @@
 Trigger exact Fe 26.1.0 build and mainnet state capture for the Bountiful challenge.
-Run: 2
+Run: 3 — include optimized IR and exact compiler binary.
