@@ -14,64 +14,74 @@ permissions:
 jobs:
   query:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Query ClickHouse GH Archive mirror
         run: |
-          set -euxo pipefail
+          set -uxo pipefail
           mkdir -p treasure-gharchive
-          cat > treasure-gharchive/query.sql <<'SQL'
+          query() {
+            name="$1"; shift
+            cat > "treasure-gharchive/${name}.sql"
+            for endpoint in 'https://play.clickhouse.com/?user=play' 'https://play.clickhouse.com/?user=play&password='; do
+              if curl -LsS --retry 2 --max-time 300 "$endpoint" -X POST \
+                   --data-binary @"treasure-gharchive/${name}.sql" \
+                   -o "treasure-gharchive/${name}.out" \
+                   2> "treasure-gharchive/${name}.err"; then
+                if ! grep -qE '(^Code:|Exception|UNKNOWN_TABLE|ACCESS_DENIED)' "treasure-gharchive/${name}.out"; then
+                  return 0
+                fi
+              fi
+            done
+            return 1
+          }
+
+          query actor-repos <<'SQL' || true
+          SELECT actor_login, repo_name, pushes, issues, stars
+          FROM github.actors_per_repo
+          WHERE actor_login = 'sampullman'
+          ORDER BY repo_name
+          FORMAT JSONEachRow
+          SQL
+
+          query actor-events <<'SQL' || true
           SELECT
-            created_at,
-            event_type,
-            actor_login,
-            repo_name,
-            repo_id,
-            action,
-            ref,
-            ref_type,
-            commit_id,
-            title,
-            body
-          FROM github_events
-          WHERE actor_login IN ('sampullman', 'sam-pullman')
+            created_at, event_type, actor_login, repo_name, repo_id,
+            action, ref, ref_type, commit_id, title, body
+          FROM github.events
+          WHERE actor_login = 'sampullman'
             AND created_at >= '2017-01-01 00:00:00'
             AND created_at < '2020-01-01 00:00:00'
           ORDER BY created_at ASC
           FORMAT JSONEachRow
           SQL
-          curl -fLsS --retry 3 'https://play.clickhouse.com/' \
-            -X POST -H 'Authorization: Basic cGxheTo=' \
-            --data-binary @treasure-gharchive/query.sql \
-            -o treasure-gharchive/sampullman-events.jsonl
-          wc -l treasure-gharchive/sampullman-events.jsonl
-          cat treasure-gharchive/sampullman-events.jsonl
 
-          cat > treasure-gharchive/repo-query.sql <<'SQL'
+          query likely-repos <<'SQL' || true
           SELECT
-            min(created_at) AS first_seen,
-            max(created_at) AS last_seen,
-            repo_name,
-            repo_id,
-            groupUniqArray(event_type) AS event_types,
-            count() AS events
-          FROM github_events
-          WHERE (actor_login = 'sampullman' OR repo_name ILIKE '%treasure%' OR repo_name ILIKE '%hunt%')
-            AND created_at >= '2018-01-01 00:00:00'
-            AND created_at < '2019-01-01 00:00:00'
-            AND (actor_login = 'sampullman' OR repo_name ILIKE 'sampullman/%' OR repo_name ILIKE '%TreasureHunt%' OR repo_name ILIKE '%treasure-hunt%')
+            min(created_at) AS first_seen, max(created_at) AS last_seen,
+            repo_name, repo_id, groupUniqArray(event_type) AS event_types, count() AS events
+          FROM github.events
+          WHERE created_at >= '2017-01-01 00:00:00'
+            AND created_at < '2020-01-01 00:00:00'
+            AND (
+              repo_name ILIKE 'sampullman/%treasure%' OR
+              repo_name ILIKE 'sampullman/%hunt%' OR
+              repo_name ILIKE '%/TreasureHunt%' OR
+              repo_name ILIKE '%/treasure-hunt%' OR
+              repo_name ILIKE '%/TH'
+            )
           GROUP BY repo_name, repo_id
           ORDER BY first_seen ASC
           FORMAT JSONEachRow
           SQL
-          curl -fLsS --retry 3 'https://play.clickhouse.com/' \
-            -X POST -H 'Authorization: Basic cGxheTo=' \
-            --data-binary @treasure-gharchive/repo-query.sql \
-            -o treasure-gharchive/repositories.jsonl
-          cat treasure-gharchive/repositories.jsonl
+
+          for f in treasure-gharchive/*.out; do echo "===== $f ====="; wc -l "$f"; head -200 "$f"; done
+          for f in treasure-gharchive/*.err; do echo "===== $f ====="; cat "$f"; done
+          test -s treasure-gharchive/actor-repos.out -o -s treasure-gharchive/actor-events.out -o -s treasure-gharchive/likely-repos.out
 
       - name: Upload GH Archive results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: treasure-hunt-gharchive
