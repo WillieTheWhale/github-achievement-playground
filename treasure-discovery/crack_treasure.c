@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <omp.h>
 
 static EVP_MD *KMD;
 static void khash(const unsigned char *in,size_t n,unsigned char out[32]){
@@ -46,14 +45,14 @@ int main(int argc,char**argv){
     memset(variants[nv],0,32);memcpy(variants[nv],line,len);names[nv++]="ascii_left";}
   int all_digit=1;for(int i=0;i<len;i++)if(!isdigit((unsigned char)line[i]))all_digit=0;
   if(all_digit){unsigned long long v=strtoull(line,NULL,10);memset(variants[nv],0,32);for(int j=0;j<8;j++)variants[nv][31-j]=(v>>(8*j))&255;names[nv++]="raw_integer";}
-  // Old web3 commonly hashes the hex text of a prior digest; cover both lowercase and 0x-prefixed forms.
   char hexbuf[67];unsigned char p0[32];khash((unsigned char*)line,len,p0);for(int j=0;j<32;j++)sprintf(hexbuf+2*j,"%02x",p0[j]);
   khash((unsigned char*)hexbuf,64,variants[nv]);names[nv++]="keccak_hex_digest";
   char pref[67];pref[0]='0';pref[1]='x';memcpy(pref+2,hexbuf,64);pref[66]=0;khash((unsigned char*)pref,66,variants[nv]);names[nv++]="keccak_0xhex_digest";
   for(int vi=0;vi<nv;vi++)for(int si=0;si<7;si++){
     unsigned char x[32],d[32];xorb(E[si],variants[vi],x);khash(x,32,d);
-    if(eq(d,H[ss[si].idx])){#pragma omp critical
-      {fprintf(out,"FOUND idx=%d sub=%d scheme=%s password=%s x=",ss[si].idx,si,names[vi],line);printhex(out,x);fprintf(out,"\n");fflush(out);}}
+    if(eq(d,H[ss[si].idx])){
+      fprintf(out,"FOUND idx=%d sub=%d scheme=%s password=%s x=",ss[si].idx,si,names[vi],line);printhex(out,x);fprintf(out,"\n");fflush(out);
+    }
   }
  }
  fprintf(out,"tested %llu candidate lines from %s\n",count,argv[1]);fflush(out);free(line);fclose(f);fclose(out);EVP_MD_free(KMD);return 0;
