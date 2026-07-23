@@ -1,0 +1,106 @@
+name: Broad funded mainnet puzzle scan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'broad-puzzle-scan/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Clone verified-contract corpus and scan live state
+        env:
+          RPC_URL: https://ethereum-rpc.publicnode.com
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/smartbugs/smartbugs-wild.git corpus
+          mkdir -p broad-out/sources
+          python3 - <<'PY'
+          import json, os, pathlib, re, time, urllib.request
+          root=pathlib.Path('corpus/contracts'); out=pathlib.Path('broad-out'); rpc=os.environ['RPC_URL']
+
+          high=[
+            (re.compile(r'(?i)guess\s+the'),10), (re.compile(r'(?i)correct\s+(answer|solution|guess)'),10),
+            (re.compile(r'(?i)solve\s+(the|this)'),8), (re.compile(r'(?i)claim\s+(the\s+)?bounty'),10),
+            (re.compile(r'(?i)win\s+.*(ether|eth|balance|prize)'),10), (re.compile(r'(?i)capture\s+the\s+ether'),10),
+            (re.compile(r'(?i)\bctf\b'),8), (re.compile(r'(?i)\briddle\b'),8), (re.compile(r'(?i)\bquiz\b'),7),
+            (re.compile(r'(?i)\bpuzzle\b'),7), (re.compile(r'(?i)\bbounty\b'),4), (re.compile(r'(?i)\bchallenge\b'),3),
+            (re.compile(r'(?i)function\s+(guess|answer|solve|claim|authenticate|reveal|unlock)\b'),5),
+            (re.compile(r'(?i)(selfdestruct|suicide)\s*\(\s*(msg\.sender|tx\.origin)'),6),
+            (re.compile(r'(?i)msg\.sender\s*\.\s*transfer\s*\('),4),
+            (re.compile(r'(?i)(keccak256|sha3)\s*\([^;]*(answer|secret|guess|solution|key|password)'),4),
+          ]
+          weak=re.compile(r'(?i)(puzzle|riddle|quiz|challenge|ctf|bounty|guess|answer|secret|solve|solver|treasure|prize|reward)')
+          rows=[]
+          for p in root.glob('0x*.sol'):
+              text=p.read_text(errors='ignore')
+              if not weak.search(text): continue
+              score=sum(weight for rgx,weight in high if rgx.search(text))
+              if score<7: continue
+              rows.append({'address':p.stem.lower(),'path':str(p),'score':score,'text':text})
+          rows.sort(key=lambda x:x['score'],reverse=True)
+          print('source candidates',len(rows),'top score',rows[0]['score'] if rows else None)
+
+          counter=0
+          def batch(reqs,attempts=5):
+              nonlocal_counter=None
+              body=json.dumps(reqs).encode(); last=None
+              for a in range(attempts):
+                  try:
+                      q=urllib.request.Request(rpc,data=body,headers={'Content-Type':'application/json','User-Agent':'broad-authorized-puzzle-scan'})
+                      with urllib.request.urlopen(q,timeout=120) as r:return json.load(r)
+                  except Exception as e:
+                      last=e; time.sleep(2**a)
+              raise last
+
+          live=[]
+          for off in range(0,len(rows),100):
+              grp=rows[off:off+100]
+              req=[{'jsonrpc':'2.0','id':i,'method':'eth_getBalance','params':[x['address'],'latest']} for i,x in enumerate(grp)]
+              got=batch(req); by={x['id']:x.get('result','0x0') for x in got if 'id'in x}
+              positives=[]
+              for i,x in enumerate(grp):
+                  bal=int(by.get(i,'0x0'),16)
+                  if bal: positives.append((x,bal))
+              if positives:
+                  req=[{'jsonrpc':'2.0','id':i,'method':'eth_getCode','params':[x['address'],'latest']} for i,(x,bal) in enumerate(positives)]
+                  got=batch(req); bycode={x['id']:x.get('result','0x') for x in got if 'id'in x}
+                  for i,(x,bal) in enumerate(positives):
+                      code=bycode.get(i,'0x')
+                      if len(code)<=2: continue
+                      text=x.pop('text'); p=pathlib.Path(x.pop('path'))
+                      dest=out/'sources'/p.name; dest.write_text(text)
+                      lines=text.splitlines(); snippets=[]
+                      hit=re.compile(r'(?i)(puzzle|riddle|quiz|ctf|bounty|guess|answer|solve|claim|authenticate|reveal|unlock|selfdestruct|suicide|msg\.sender.*transfer)')
+                      for j,line in enumerate(lines):
+                          if hit.search(line):
+                              lo=max(0,j-3); hi=min(len(lines),j+8)
+                              s='\n'.join(f'{k+1}: {lines[k]}' for k in range(lo,hi))
+                              if s not in snippets: snippets.append(s)
+                          if len(snippets)>=12: break
+                      live.append({'address':x['address'],'score':x['score'],'balance_wei':str(bal),'balance_eth':bal/1e18,'code_bytes':(len(code)-2)//2,'source_file':str(dest),'snippets':snippets})
+              print('queried',min(off+100,len(rows)),'live',len(live))
+          live.sort(key=lambda x:(-x['score'],-int(x['balance_wei'])))
+          (out/'live.json').write_text(json.dumps(live,indent=2)+'\n')
+          with (out/'summary.md').open('w') as f:
+              f.write(f'# Broad live puzzle scan\n\nCandidates: {len(rows)}\n\nLive funded: {len(live)}\n\n')
+              for x in live:
+                  f.write(f"## {x['address']} — {x['balance_eth']:.18f} ETH — score {x['score']}\n\n")
+                  for s in x['snippets']: f.write('```solidity\n'+s+'\n```\n\n')
+          print(json.dumps(live[:50],indent=2))
+          PY
+      - name: Upload broad scan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: broad-funded-puzzle-scan
+          path: broad-out
+          retention-days: 7
+          if-no-files-found: error
