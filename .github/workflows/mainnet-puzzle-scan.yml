@@ -1,0 +1,105 @@
+name: Mainnet authorized puzzle scan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mainnet-puzzle-scan/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan verified historical mainnet contracts and query live balances
+        env:
+          RPC_URL: https://ethereum-rpc.publicnode.com
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/smartbugs/smartbugs-wild.git corpus
+          mkdir -p scan-out/sources
+          python3 - <<'PY'
+          import json, os, pathlib, re, time, urllib.request, urllib.error
+
+          root = pathlib.Path('corpus/contracts')
+          out = pathlib.Path('scan-out')
+          rpc = os.environ['RPC_URL']
+
+          puzzle_words = re.compile(r'(?i)\b(puzzle|riddle|quiz|challenge|ctf|bounty|solve|solver|answer|guess|treasure|reward)\b')
+          explicit_intent = re.compile(r'(?i)(capture.the.ether|ethernaut|ctf|puzzle|riddle|quiz|bounty|challenge|guess the|solve|correct answer|prize)')
+          payout = re.compile(r'(?is)(selfdestruct\s*\(\s*(?:payable\s*\()?msg\.sender|suicide\s*\(\s*msg\.sender|msg\.sender\s*\.\s*transfer\s*\(\s*(?:address\s*\(\s*this\s*\)|this)\s*\.\s*balance|msg\.sender\s*\.\s*call\s*\.\s*value\s*\(\s*(?:address\s*\(\s*this\s*\)|this)\s*\.\s*balance)')
+          answerish = re.compile(r'(?i)(keccak256|sha3|ecrecover|blockhash|secret|password|answer|guess|solve|proof)')
+
+          candidates=[]
+          for p in root.glob('0x*.sol'):
+              try: text=p.read_text(errors='ignore')
+              except Exception: continue
+              if not puzzle_words.search(text): continue
+              if not explicit_intent.search(text): continue
+              if not payout.search(text): continue
+              if not answerish.search(text): continue
+              candidates.append((p.stem.lower(), p, text))
+
+          print('source candidates',len(candidates))
+
+          def rpc_batch(reqs, attempts=5):
+              body=json.dumps(reqs).encode()
+              for attempt in range(attempts):
+                  try:
+                      q=urllib.request.Request(rpc,data=body,headers={'Content-Type':'application/json','User-Agent':'authorized-puzzle-research'})
+                      with urllib.request.urlopen(q,timeout=90) as r:return json.load(r)
+                  except Exception as e:
+                      if attempt+1==attempts: raise
+                      time.sleep(2**attempt)
+
+          live=[]
+          chunk=50
+          for off in range(0,len(candidates),chunk):
+              group=candidates[off:off+chunk]
+              req=[]
+              for i,(addr,p,text) in enumerate(group):
+                  req.append({'jsonrpc':'2.0','id':2*i,'method':'eth_getBalance','params':[addr,'latest']})
+                  req.append({'jsonrpc':'2.0','id':2*i+1,'method':'eth_getCode','params':[addr,'latest']})
+              got=rpc_batch(req)
+              byid={x['id']:x.get('result') for x in got if 'id' in x}
+              for i,(addr,p,text) in enumerate(group):
+                  bal=int(byid.get(2*i) or '0x0',16)
+                  code=byid.get(2*i+1) or '0x'
+                  if bal>0 and len(code)>2:
+                      # Pull compact, high-signal source windows around payout and answer checks.
+                      lines=text.splitlines()
+                      hits=[]
+                      for j,line in enumerate(lines):
+                          if payout.search(line) or re.search(r'(?i)(answer|guess|solve|authenticate|reward|prize)',line):
+                              lo=max(0,j-4);hi=min(len(lines),j+9)
+                              window='\n'.join(f'{k+1}: {lines[k]}' for k in range(lo,hi))
+                              if window not in hits:hits.append(window)
+                          if len(hits)>=8:break
+                      dest=out/'sources'/p.name
+                      dest.write_text(text)
+                      live.append({'address':addr,'balance_wei':str(bal),'balance_eth':bal/1e18,'code_bytes':(len(code)-2)//2,'source_file':str(dest),'snippets':hits})
+              print('queried',min(off+chunk,len(candidates)),'live',len(live))
+
+          live.sort(key=lambda x:int(x['balance_wei']),reverse=True)
+          (out/'live-funded-authorized-puzzles.json').write_text(json.dumps(live,indent=2)+'\n')
+          with (out/'summary.md').open('w') as f:
+              f.write(f'# Live funded authorized-puzzle candidates\n\nSource candidates: {len(candidates)}\n\nLive funded: {len(live)}\n\n')
+              for x in live:
+                  f.write(f"## {x['address']} — {x['balance_eth']:.18f} ETH\n\nRuntime: {x['code_bytes']} bytes\n\n")
+                  for s in x['snippets']:
+                      f.write('```solidity\n'+s+'\n```\n\n')
+          print(json.dumps(live[:30],indent=2))
+          PY
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mainnet-authorized-puzzle-scan
+          path: scan-out
+          retention-days: 7
+          if-no-files-found: error
