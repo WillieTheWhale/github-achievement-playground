@@ -1,0 +1,41 @@
+name: Bountiful Fe 26.1 IR capture
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bountiful-ir/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exact optimized IR
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          curl -fL --retry 3 -o fe https://github.com/argotorg/fe/releases/download/v26.1.0/fe_linux_amd64
+          chmod +x fe
+          ./fe --version | tee out/fe-version.txt
+          cp fe out/fe-26.1.0-linux-amd64
+          git clone https://github.com/fe-lang/bountiful.git source
+          git -C source checkout d5e2ce34021336a234f4b7de36719087ea6fb96e
+          git -C source submodule update --init --recursive
+          (cd source/contracts && "$GITHUB_WORKSPACE/fe" build --emit bytecode,runtime-bytecode,abi,ir)
+          cp -a source/contracts/out out/compiler-artifacts
+          cp -a source/contracts out/source-contracts
+          find out/compiler-artifacts -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee out/artifact-list.txt
+      - name: Upload exact compiler, source, and IR
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bountiful-fe261-ir
+          path: out
+          retention-days: 7
+          if-no-files-found: error
