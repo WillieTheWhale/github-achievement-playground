@@ -30,15 +30,16 @@ jobs:
             https://github.com/argotorg/fe/releases/download/v26.1.0/fe_linux_amd64
           chmod +x research/fe
           research/fe --version | tee research/out/fe-version.txt
+          cp research/fe research/out/fe-26.1.0-linux-amd64
           git clone https://github.com/fe-lang/bountiful.git research/bountiful
           git -C research/bountiful checkout d5e2ce34021336a234f4b7de36719087ea6fb96e
           git -C research/bountiful submodule update --init --recursive
 
-      - name: Build exact deployment artifacts
+      - name: Build exact deployment artifacts and IR
         run: |
           set -euxo pipefail
           export PATH="$PWD/research:$PATH"
-          (cd research/bountiful/contracts && fe build)
+          (cd research/bountiful/contracts && fe build --emit bytecode,runtime-bytecode,abi,ir)
           find research/bountiful/contracts/out -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee research/out/artifact-list.txt
           cp -a research/bountiful/contracts/out research/out/compiler-artifacts
 
